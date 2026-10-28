@@ -5,6 +5,9 @@
 #   iscc/run.sh setup <iscc-sdk version>   venv, corpus, TrustMark weights
 #   iscc/run.sh image <iscc-sdk version>   image track: extract, search, metrics
 #   iscc/run.sh wm <iscc-sdk version>      watermark-combination track (needs the image track first)
+#   iscc/run.sh security <iscc-sdk version>     security track: the image attacks that involve ISCC (iscc/security.py
+#                                               and bench_security.py collision; needs the image track first)
+#   iscc/run.sh sensitivity <iscc-sdk version>  image track without the near-duplicate cleanup (BENCH_DEDUP=none)
 #
 # Versions: 0.9.5 runs iscc-sdk 0.9.5 with iscc-core 1.4.0 and iscc-lib 0.6.0, as the paper did; 0.9.7 runs the
 # released update, iscc-sdk 0.9.7 with iscc-core 1.5.0, iscc-lib 0.7.0 and iscc-sci 0.4.1.
@@ -74,6 +77,29 @@ wm() {
   [[ -f $ROOT/wm/image/decode.json ]] || "$PY" "$BENCHPY" wmcombo decode image
   "$PY" "$BENCHPY" derive
   "$PY" "$BENCHPY" wmcombo analyze
+}
+
+security() {
+  "$UV" pip install -q --python "$PY" -r "$HERE/requirements-cpu.in" -r "$HERE/requirements-security.in" $ISCC
+  (cd "$BENCH/scripts" && "$PY" fetch_weights.py --only sscd_disc_mixup)
+  mkdir -p "$ROOT/security" "$BENCH_RESULTS/security"
+  ln -sfn "$ROOT/security" "$BENCH_WORK/out/security"  # the transfer perturbations do not depend on ISCC
+  local shards=$(( $(nproc --all) / 4 )) pids=()
+  for k in $(seq 0 $((shards - 1))); do
+    OMP_NUM_THREADS=4 "$PY" "$HERE/security.py" craft --shard "$k/$shards" & pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p"; done
+  export OMP_NUM_THREADS=8
+  "$PY" "$HERE/security.py" transfer
+  "$PY" "$HERE/security.py" surrogate
+  (cd "$BENCH/scripts" && "$PY" bench_security.py collision --device cpu)
+  "$UV" pip freeze -q --python "$PY" > "$BENCH_RESULTS/security/requirements-cpu.lock"
+}
+
+sensitivity() {
+  cd "$BENCH/scripts"
+  BENCH_DEDUP=none "$PY" "$BENCHPY" image search --only ISCC-Image-64,ISCC-Image-256
+  BENCH_DEDUP=none "$PY" "$BENCHPY" image metrics
 }
 
 "$stage"

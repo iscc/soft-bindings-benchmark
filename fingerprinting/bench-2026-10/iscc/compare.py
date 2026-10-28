@@ -2,10 +2,10 @@
 
 Reads results-gpu/ (the paper's records), results-iscc/iscc-sdk-0.9.5/ (this rerun with the ISCC versions the paper
 ran) and results-iscc/iscc-sdk-0.9.7/ (the released update, which also holds the Semantic-Code methods the paper
-did not report: ISCC-SCI-64, ISCC-SCI-256 and ISCC-Combined-512). The last section rebuilds the paper's numbers with its
-own paper/scripts/build_numbers.py from a copy of results-gpu/ whose ISCC Image-Code records come from the update,
-and lists every number cited in the text that changes. The bootstrap intervals (_cluster_ci.json) stay the paper's:
-cluster_ci.py does not reproduce them bit for bit on another host.
+did not report: ISCC-SCI-64, ISCC-SCI-256 and ISCC-Combined-512), including their security records, no-cleanup
+duplicate-rule records and source-level bootstrap (iscc/stats.py). The last section rebuilds the paper's numbers with
+its own paper/scripts/build_numbers.py from a copy of results-gpu/ whose ISCC Image-Code records come from the update,
+and lists every number cited in the text that changes.
 
     uv run --no-project --with numpy==2.4.6 --with scipy==1.17.1 python iscc/compare.py
 """
@@ -178,18 +178,140 @@ def watermark(wm_paper: dict, wm_old: dict, wm_new: dict) -> str:
     return table(["Method", "", "Paper", "Rerun, paper's ISCC versions", "Update"], rows)
 
 
+RUNS = ("paper", "rerun, paper's ISCC versions", "update")
+EPS = ("2", "4", "8", "16")
+ANCHORS = ("PDQ", "DINOv2-S", "SSCD-mixup", "OpenCLIP-B32")  # scored by the rerun as reference points
+
+
+def security_records(name: str) -> list[dict]:
+    """A security record of the paper, the rerun with its ISCC versions and the update."""
+    return [read_json(r / "security" / name) for r in (PAPER, OLD, NEW)]
+
+
+def transfer(evs: list[dict]) -> str:
+    """Attacked originals no longer matched after the ensemble transfer attack, per budget."""
+    rows = []
+    for m in ISCC + ("ISCC-SCI-256",) + ANCHORS:
+        runs = (("paper", evs[0]), ("rerun", evs[1])) if m in ANCHORS else zip(RUNS, evs)
+        for run, ev in runs:
+            per = [ev["transfer"][e].get(m) for e in EPS]
+            if any(per):
+                rows.append([m, run, *(pct(p["summary"]["rate"]) if p else "–" for p in per)])
+    return table(["Method", "Run", *(f"{e} grey levels" for e in EPS)], rows)
+
+
+def rate_at(rows: list[dict], t: float):
+    """Evasion rate at another threshold, among items matched before the attack (build_numbers' rescoring)."""
+    ok = [r for r in rows if r["score_clean"] >= t]
+    return sum(r["score_adv"] < t for r in ok) / len(ok) if ok else None
+
+
+def surrogate(evs: list[dict], images: list[dict]) -> str:
+    """ISCC-Image-64 evaded by the surrogate attack, per budget, at pair-level 10⁻⁶ and 10⁻⁷."""
+    m = "ISCC-Image-64"
+    rows = []
+    for run, ev, rec in zip(RUNS, evs, images):
+        per = ev["surrogate"][m]
+        rows.append([run, *(f"{pct(per[e]['summary']['rate'])} / {pct(rate_at(per[e]['rows'], rec[m]['thresholds'][OP]))}"
+                            for e in EPS)])
+    return table(["Run", *(f"{e} grey levels" for e in EPS)], rows)
+
+
+def collision(cos: list[dict]) -> str:
+    """Unrelated images made to bind to a registered original as ISCC-Image-64, per budget."""
+    m = "ISCC-Image-64"
+    return table(["Run", "4 grey levels", "8 grey levels", "16 grey levels"],
+                 [[run, *(pct(co["methods"][m][e]["summary"]["rate"]) for e in ("4", "8", "16"))]
+                  for run, co in zip(RUNS, cos)])
+
+
+def interval(x: dict, value: str, ci: str) -> str:
+    """A rate with its 95 % bootstrap interval, in percent."""
+    return f"{pct(x[value])} [{pct(x[ci][0])}, {pct(x[ci][1])}]"
+
+
+def bootstrap(cis: list[dict]) -> str:
+    """Source-level intervals of the ISCC methods and the paired tests that involve them."""
+    rows = [[m, run, interval(ci["methods"][f"image/{m}"][OP], "tpr", "tpr_ci"),
+             interval(ci["methods"][f"image/{m}"], "r1", "r1_ci")] for m in ISCC for run, ci in zip(RUNS, cis)]
+    pairs = [[f"{r['a']} − {r['b']}", run, interval(r, "diff", "diff_ci"), f"{r['p_holm']:.4f}"]
+             for run, ci in zip(RUNS, cis) for r in ci["paired"] if involves_iscc(r)]
+    added = [[f"{r['a']} − {r['b']}", run, interval(r, "diff", "diff_ci"), f"{r['p_signflip']:.4f}"]
+             for run, ci in zip(RUNS[1:], cis[1:]) for r in ci.get("added", [])]
+    paired = [[r for r in ci["paired"] if involves_iscc(r)] for ci in cis[:2]]
+    same = all(not differences(cis[0]["methods"][f"image/{m}"], cis[1]["methods"][f"image/{m}"]) for m in ISCC) and \
+        not differences(*paired)
+    check = ("With the paper's ISCC versions, `cluster_ci.py` reproduces the paper's ISCC intervals and paired tests."
+             if same else "With the paper's ISCC versions, the ISCC intervals or paired tests DIFFER from the paper's.")
+    return "\n\n".join([check,
+                        table(["Method", "Run", "Detected at 10⁻⁷ [95 % CI]", "Recall@1 [95 % CI]"], rows),
+                        "Planned paired comparisons that involve ISCC (difference in detection at 10⁻⁷, Holm-adjusted "
+                        "p over the paper's eight comparisons):",
+                        table(["A − B", "Run", "Difference [95 % CI]", "p (Holm)"], pairs),
+                        "Added comparison, tested on its own with the same sign-flip test (not part of the paper's "
+                        "planned family):",
+                        table(["A − B", "Run", "Difference [95 % CI]", "p"], added)])
+
+
+def sensitivity() -> str:
+    """Detection of the ISCC methods without the near-duplicate cleanup."""
+    rows = []
+    for m in ISCC:
+        for run, res in zip(RUNS, (PAPER, OLD, NEW)):
+            p = read_json(res / "image_dedup-none" / f"{m}.json")["per_attack"]["_all"]
+            rows.append([m, run, pct(p["TPR@query@0.01"]), pct(p[f"TPR@{OP}"])])
+    return table(["Method", "Run", "Detected at query-level 1 %", "Detected at 10⁻⁷"], rows)
+
+
 # ------------------------------------------------------------------ the paper's cited numbers
-def merged_results(dst: Path) -> Path:
-    """A copy of results-gpu/ whose ISCC Image-Code records come from the update."""
+def merged_results(dst: Path, run: Path = NEW) -> Path:
+    """A copy of results-gpu/ whose ISCC Image-Code records come from a rerun (by default the update): image and
+    watermark tracks and, where the rerun has them, security, the no-cleanup duplicate rule and the source-level
+    bootstrap."""
     shutil.copytree(PAPER, dst)
     for m in ISCC:
-        shutil.copy(NEW / "image" / f"{m}.json", dst / "image" / f"{m}.json")
-        shutil.copy(NEW / "image" / "_perquery" / f"{m}.npz", dst / "image" / "_perquery" / f"{m}.npz")
+        shutil.copy(run / "image" / f"{m}.json", dst / "image" / f"{m}.json")
+        shutil.copy(run / "image" / "_perquery" / f"{m}.npz", dst / "image" / "_perquery" / f"{m}.npz")
+        if (run / "image_dedup-none" / f"{m}.json").exists():
+            shutil.copy(run / "image_dedup-none" / f"{m}.json", dst / "image_dedup-none" / f"{m}.json")
     wm = read_json(PAPER / "wmcombo" / "wmcombo.json")
-    wm["image"]["methods"].update({m: wm_records(NEW)[m] for m in ISCC})
+    wm["image"]["methods"].update({m: wm_records(run)[m] for m in ISCC})
     (dst / "wmcombo" / "wmcombo.json.gz").unlink()
     (dst / "wmcombo" / "wmcombo.json").write_text(json.dumps(wm))
+    merge_security(dst / "security", run / "security")
+    merge_cluster(dst / "_cluster_ci.json", run / "_cluster_ci.json")
     return dst
+
+
+def merge_security(dst: Path, src: Path) -> None:
+    """Put a rerun's ISCC entries into the paper's evasion and collision records."""
+    if (src / "evasion.json").exists():
+        ev, new = read_json(dst / "evasion.json"), read_json(src / "evasion.json")
+        ev["surrogate"].update(new["surrogate"])
+        ev["thresholds"].update({m: new["thresholds"][m] for m in ISCC})
+        for eps, per in new["transfer"].items():
+            ev["transfer"][eps].update({m: {k: v for k, v in per[m].items() if k != "rows"} for m in ISCC})
+        (dst / "evasion.json").write_text(json.dumps(ev))
+    if (src / "collision.json").exists():
+        co = read_json(dst / "collision.json")
+        co["methods"].update(read_json(src / "collision.json")["methods"])
+        (dst / "collision.json").write_text(json.dumps(co))
+
+
+def involves_iscc(row: dict) -> bool:
+    """Whether a paired comparison involves one of the paper's ISCC methods."""
+    return row["a"] in ISCC or row["b"] in ISCC
+
+
+def merge_cluster(dst: Path, src: Path) -> None:
+    """Put a rerun's ISCC intervals and its paired tests that involve ISCC into the paper's _cluster_ci.json."""
+    if not src.exists():
+        return
+    ci, new = read_json(dst), read_json(src)
+    ci["methods"].update({f"image/{m}": new["methods"][f"image/{m}"] for m in ISCC})
+    pairs = {(r["a"], r["b"]): r for r in new["paired"]}
+    ci["paired"] = [pairs[(r["a"], r["b"])] if involves_iscc(r) else r for r in ci["paired"]]
+    dst.write_text(json.dumps(ci))
 
 
 def rebuild(raw: Path) -> dict[str, str]:
@@ -238,6 +360,8 @@ def cited_changes() -> str:
 def report() -> str:
     paper, old, new = image_records(PAPER), image_records(OLD), image_records(NEW)
     wm_paper, wm_old, wm_new = wm_records(PAPER), wm_records(OLD), wm_records(NEW)
+    evs, cos = security_records("evasion.json"), security_records("collision.json")
+    cis = [read_json(r / "_cluster_ci.json") for r in (PAPER, OLD, NEW)]
     return "\n\n".join([
         "# ISCC rerun: results",
         "Generated by `iscc/compare.py` from `results-gpu/` (the paper), `results-iscc/iscc-sdk-0.9.5/` (this "
@@ -252,10 +376,26 @@ def report() -> str:
         "## Ranking at the headline operating point", ranking(paper, new),
         "## Recall@1 per transformation", per_attack(paper, new),
         "## Watermark-combination track (TrustMark Q, 300 product photos)", watermark(wm_paper, wm_old, wm_new),
+        "## Source-level bootstrap and paired tests", bootstrap(cis),
+        "## Security track: evasion and forgery",
+        "The paper's image attacks that involve ISCC, on its first 100 registered originals with its seeds, budgets "
+        "(grey levels of 255) and 40 PGD steps. Success is judged by the real extractor at the pair-level 10⁻⁶ "
+        "threshold of each run's own record, as `bench_security.py` does.",
+        "Transfer attack crafted on DINOv2-S, SSCD-mixup and OpenCLIP-B32 (the attacker never models ISCC): share "
+        "of originals that no longer match. The perturbations were made once and scored with both ISCC versions; "
+        "PDQ and the ensemble methods were scored at the paper's thresholds as reference points.", transfer(evs),
+        "Surrogate attack on ISCC-Image-64 (gradients from `hash_surrogates.py`, whose trim box follows the installed "
+        "iscc-sdk): share evaded at 10⁻⁶ / at 10⁻⁷.", surrogate(evs, [paper, old, new]),
+        "Forgery: unrelated images made to become the top match of a registered original above the 10⁻⁶ threshold "
+        "(ISCC-Image-64).", collision(cos),
+        "## Duplicate-rule sensitivity: no near-duplicate cleanup",
+        "The \"two of three\" rule cannot be rerun: it needs the duplicate evidence of the paper's work directory, "
+        "which the repository does not carry.", sensitivity(),
         "## Numbers cited in the paper that change",
-        "Rebuilt with the paper's `build_numbers.py` from `results-gpu/` with the update's ISCC Image-Code records in "
-        "place of the paper's. Source-level bootstrap intervals and paired tests (`_cluster_ci.json`), security, "
-        "localisation, latency and duplicate-rule sensitivity were not recomputed and keep the paper's ISCC values.",
+        "Rebuilt with the paper's `build_numbers.py` from `results-gpu/` with the update's ISCC records in place of "
+        "the paper's: image and watermark tracks, source-level bootstrap and paired tests, security (evasion and "
+        "collision) and the no-cleanup duplicate rule. Edit retrieval and localisation, latency, cross-host "
+        "stability, inversion and the \"two of three\" duplicate rule keep the paper's ISCC values.",
         cited_changes(),
     ]) + "\n"
 
