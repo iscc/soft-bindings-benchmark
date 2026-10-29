@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Reruns the ISCC methods of the image track and of the image part of the watermark-combination track on a CPU
-# host, with the harness in scripts/ unchanged, once per set of ISCC versions:
+# Reruns the ISCC image methods of the paper's image track, the image part of its watermark-combination track and
+# the evasion and forgery attacks of its security track on a CPU host with the harness in scripts/, once per set of
+# ISCC versions. The harness code differs from the paper's only in the ISCC surrogate's trim box
+# (scripts/hash_surrogates.py), which follows the installed iscc-sdk; the ISCC versions come from this script, not
+# from scripts/requirements.in.
 #
 #   iscc/run.sh setup <iscc-sdk version>   venv, corpus, TrustMark weights
 #   iscc/run.sh image <iscc-sdk version>   image track: extract, search, metrics
@@ -16,11 +19,13 @@
 # pilot-only ISCC-SCI-256 and two methods made from stored descriptors, ISCC-SCI-64 and ISCC-Combined-512
 # (iscc/bench.py adds these three to the paper's method table). The paper reports no Semantic-Code to compare with.
 #
-# Environment: ROOT (default ~/sbb-iscc) holds one work directory per version; corpus, weights and the
-# watermarked images are shared. ABO_DIR and DISC21_DIR may point to existing copies of corpus/abo/img and
-# corpus/disc21; setup links them and fetches what is missing. Results go to results-iscc/iscc-sdk-<version>/.
-# The near-duplicate lists come from the paper (results-gpu/image/_dedup.json): its dedup stage uses PDQ,
-# SSCD and DINOv2-B, not ISCC.
+# Environment: ROOT (default ~/sbb-iscc) holds one work directory per version; corpus, weights, the watermarked
+# images and the transfer perturbations are shared. DISC21 is not downloaded: put a copy in $ROOT/corpus/disc21 or
+# point DISC21_DIR to one; ABO_DIR may point to an existing copy of corpus/abo/img. The first setup links them,
+# fetches the missing ABO photos and checks every ABO and DISC21 file against the paper's manifest; if fetching or
+# the check fails, delete $ROOT/corpus/corpus_manifest.json before running setup again. Results go to
+# results-iscc/iscc-sdk-<version>/. The near-duplicate lists come from the paper (results-gpu/image/_dedup.json):
+# its dedup stage uses PDQ, SSCD and DINOv2-B, not ISCC.
 set -euo pipefail
 
 stage=$1 version=$2

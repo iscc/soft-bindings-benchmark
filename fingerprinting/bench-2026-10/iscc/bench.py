@@ -8,7 +8,7 @@ stored descriptors:
   ISCC-Combined-512  ISCC-SCI-256 followed by ISCC-Image-256, compared as one 512-bit code (the usual order of
                      ISCC units, from the more abstract to the more concrete)
 
-The scripts in scripts/ run unchanged. Registration happens at import, so the spawned worker processes, which
+bench_image.py and bench_wmcombo.py run unchanged. Registration happens at import, so the spawned worker processes, which
 import this module again, know the methods too.
 
     python bench.py image extract|search|metrics [args]   bench_image.py with the added methods
